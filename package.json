@@ -1,0 +1,12 @@
+{
+  "name": "upline-emergency",
+  "version": "1.0.0",
+  "description": "Offline emergency triage PWA",
+  "main": "serve.js",
+  "scripts": {
+    "start": "node serve.js",
+    "dev": "npx serve ."
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
