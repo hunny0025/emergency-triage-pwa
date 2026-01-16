@@ -1792,7 +1792,77 @@ document.addEventListener('DOMContentLoaded', () => {
     app = new EmergencyTriageApp();
     window.app = app; // Make available globally for HTML event handlers
 });
+// In your app.js
+class TriageDB {
+  constructor() {
+    this.registerServiceWorker();
+  }
+  
+  async registerServiceWorker() {
+    if ('serviceWorker' in navigator) {
+      await navigator.serviceWorker.register('/sw.js');
+      this.sw = navigator.serviceWorker.controller;
+    }
+  }
+  
+  async savePatient(patientData) {
+    return this.sendMessage('SAVE_PATIENT', { patient: patientData });
+  }
+  
+  async getPatients(filters = {}) {
+    return this.sendMessage('GET_PATIENTS', filters);
+  }
+  
+  async exportData() {
+    return this.sendMessage('EXPORT_DATA');
+  }
+  
+  async importData(jsonData) {
+    return this.sendMessage('IMPORT_DATA', { data: jsonData });
+  }
+  
+  sendMessage(type, data = {}) {
+    return new Promise((resolve, reject) => {
+      const messageChannel = new MessageChannel();
+      
+      messageChannel.port1.onmessage = (event) => {
+        if (event.data.success) {
+          resolve(event.data);
+        } else {
+          reject(event.data.error);
+        }
+      };
+      
+      navigator.serviceWorker.controller.postMessage(
+        { type, ...data },
+        [messageChannel.port2]
+      );
+    });
+  }
+}
+
+// Usage
+const triageDB = new TriageDB();
+
+// Save a patient
+const patient = {
+  name: "John Doe",
+  age: 35,
+  priority: "urgent",
+  symptoms: ["Chest pain", "Shortness of breath"],
+  location: "ER Room 3",
+  vitalSigns: {
+    bp: "140/90",
+    hr: 110,
+    temp: 38.2
+  }
+};
+
+triageDB.savePatient(patient).then(result => {
+  console.log('Patient saved with ID:', result.id);
+});
 
 // Export for debugging
 window.EmergencyTriageApp = EmergencyTriageApp;
+
 window.VoiceService = VoiceService;
