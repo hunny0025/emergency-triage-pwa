@@ -1,4 +1,9 @@
 {
+  {
+  "name": "Emergency Triage",
+  "short_name": "Triage",
+  "start_url": "./?v=2",
+}
   "name": "Emergency Triage PWA",
   "short_name": "Triage",
   "description": "Priority-based patient assessment system",
@@ -24,3 +29,4 @@
     }
   ]
 }
+
