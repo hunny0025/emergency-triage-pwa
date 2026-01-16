@@ -1,84 +1,52 @@
-
-// sw.js - Advanced Service Worker for Emergency Triage
-const CACHE_NAME = 'upline-triage-v2';
-const DYNAMIC_CACHE = 'upline-dynamic-v1';
+// sw.js - Client-only Emergency Triage PWA
+const CACHE_NAME = 'emergency-triage-v1';
 const OFFLINE_URL = '/offline.html';
+const DB_NAME = 'triage-db';
+const DB_VERSION = 2; // Increased for schema updates
 
-// Assets to cache immediately
+// Assets to cache
 const urlsToCache = [
   '/',
   '/index.html',
   '/manifest.json',
   '/styles.css',
   '/app.js',
-  '/icon-192.png',
-  '/icon-512.png'
+  '/icons/icon-72x72.png',
+  '/icons/icon-96x96.png',
+  '/icons/icon-128x128.png',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
+  '/offline.html',
+  '/lib/idb.js' // Include IndexedDB library if needed
 ];
 
-// Install event - cache static assets
+// Install - Cache all assets
 self.addEventListener('install', event => {
-  console.log('[Service Worker] Installing...');
-  
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => {
-        console.log('[Service Worker] Caching app shell');
-        return cache.addAll(urlsToCache);
-      })
-      .then(() => {
-        console.log('[Service Worker] Skip waiting');
-        return self.skipWaiting();
-      })
+      .then(cache => cache.addAll(urlsToCache))
+      .then(() => self.skipWaiting())
   );
 });
 
-// Activate event - clean up old caches
+// Activate - Clean old caches
 self.addEventListener('activate', event => {
-  console.log('[Service Worker] Activating...');
-  
   event.waitUntil(
     caches.keys().then(cacheNames => {
       return Promise.all(
         cacheNames.map(cacheName => {
-          if (cacheName !== CACHE_NAME && cacheName !== DYNAMIC_CACHE) {
-            console.log('[Service Worker] Deleting old cache:', cacheName);
+          if (cacheName !== CACHE_NAME) {
             return caches.delete(cacheName);
           }
         })
       );
-    }).then(() => {
-      console.log('[Service Worker] Claiming clients');
-      return self.clients.claim();
-    })
+    }).then(() => self.clients.claim())
   );
 });
 
-// Fetch event - network first, cache fallback
+// Fetch - Cache-first strategy
 self.addEventListener('fetch', event => {
-  // Skip non-GET requests
-  if (event.request.method !== 'GET') return;
-  
-  // For API requests, try network first, then cache
-  if (event.request.url.includes('/api/')) {
-    event.respondWith(
-      fetch(event.request)
-        .then(response => {
-          // Cache the response for offline use
-          const responseClone = response.clone();
-          caches.open(DYNAMIC_CACHE).then(cache => {
-            cache.put(event.request, responseClone);
-          });
-          return response;
-        })
-        .catch(() => {
-          // Return cached response if network fails
-          return caches.match(event.request);
-        })
-    );
-    return;
-  }
-  
-  // For page navigation
+  // For HTML pages, network first
   if (event.request.mode === 'navigate') {
     event.respondWith(
       fetch(event.request)
@@ -88,164 +56,226 @@ self.addEventListener('fetch', event => {
     return;
   }
   
-  // For static assets, cache first
+  // For all other assets, cache first
   event.respondWith(
     caches.match(event.request)
       .then(response => {
-        return response || fetch(event.request)
+        if (response) return response;
+        
+        return fetch(event.request)
           .then(fetchResponse => {
-            // Cache the new resource
-            return caches.open(DYNAMIC_CACHE)
-              .then(cache => {
-                cache.put(event.request.url, fetchResponse.clone());
-                return fetchResponse;
-              });
+            // Don't cache API-like requests or external resources
+            if (!event.request.url.includes('/api/') && 
+                event.request.url.startsWith(self.location.origin)) {
+              const responseClone = fetchResponse.clone();
+              caches.open(CACHE_NAME)
+                .then(cache => cache.put(event.request, responseClone));
+            }
+            return fetchResponse;
+          })
+          .catch(error => {
+            console.log('Fetch failed; returning offline page', error);
+            return caches.match(OFFLINE_URL);
           });
       })
   );
 });
 
-// Background sync for offline data
-self.addEventListener('sync', event => {
-  console.log('[Service Worker] Background sync:', event.tag);
+// ============================
+// OFFLINE-ONLY DATA MANAGEMENT
+// ============================
+
+// Setup IndexedDB for local storage
+self.addEventListener('message', async event => {
+  if (event.data.type === 'INIT_DB') {
+    await initDatabase();
+    event.ports[0].postMessage({ success: true });
+  }
   
-  if (event.tag === 'sync-patients') {
-    event.waitUntil(syncPatients());
+  if (event.data.type === 'SAVE_PATIENT') {
+    const patientId = await savePatient(event.data.patient);
+    event.ports[0].postMessage({ success: true, id: patientId });
+  }
+  
+  if (event.data.type === 'GET_PATIENTS') {
+    const patients = await getAllPatients();
+    event.ports[0].postMessage({ success: true, patients });
+  }
+  
+  if (event.data.type === 'UPDATE_PATIENT') {
+    await updatePatient(event.data.id, event.data.updates);
+    event.ports[0].postMessage({ success: true });
+  }
+  
+  if (event.data.type === 'DELETE_PATIENT') {
+    await deletePatient(event.data.id);
+    event.ports[0].postMessage({ success: true });
+  }
+  
+  if (event.data.type === 'EXPORT_DATA') {
+    const data = await exportAllData();
+    event.ports[0].postMessage({ success: true, data });
+  }
+  
+  if (event.data.type === 'IMPORT_DATA') {
+    await importData(event.data.data);
+    event.ports[0].postMessage({ success: true });
   }
 });
 
-// Sync patients data when back online
-async function syncPatients() {
-  console.log('[Service Worker] Syncing patient data...');
-  
-  // Get pending syncs from IndexedDB
-  const pendingSyncs = await getPendingSyncs();
-  
-  for (const sync of pendingSyncs) {
-    try {
-      // Simulate API call
-      const response = await fetch('/api/patients', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sync.data)
-      });
-      
-      if (response.ok) {
-        console.log('[Service Worker] Sync successful:', sync.id);
-        await removePendingSync(sync.id);
-      }
-    } catch (error) {
-      console.error('[Service Worker] Sync failed:', error);
-    }
-  }
-}
-
-// IndexedDB for offline data storage
-const DB_NAME = 'upline-triage-db';
-const DB_VERSION = 1;
-
-function openDatabase() {
+// Database initialization
+async function initDatabase() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
     
-    request.onupgradeneeded = event => {
+    request.onupgradeneeded = (event) => {
       const db = event.target.result;
       
-      // Create patients store
+      // Patients store
       if (!db.objectStoreNames.contains('patients')) {
-        const patientsStore = db.createObjectStore('patients', { 
+        const store = db.createObjectStore('patients', {
           keyPath: 'id',
-          autoIncrement: true 
+          autoIncrement: true
         });
-        patientsStore.createIndex('priority', 'priority', { unique: false });
-        patientsStore.createIndex('timestamp', 'timestamp', { unique: false });
-        patientsStore.createIndex('status', 'status', { unique: false });
+        store.createIndex('priority', 'priority', { unique: false });
+        store.createIndex('status', 'status', { unique: false });
+        store.createIndex('createdAt', 'createdAt', { unique: false });
+        store.createIndex('location', 'location', { unique: false });
       }
       
-      // Create pending syncs store
-      if (!db.objectStoreNames.contains('pendingSyncs')) {
-        const syncsStore = db.createObjectStore('pendingSyncs', { 
+      // Triage history for analytics
+      if (!db.objectStoreNames.contains('triage_history')) {
+        const store = db.createObjectStore('triage_history', {
           keyPath: 'id',
-          autoIncrement: true 
+          autoIncrement: true
         });
-        syncsStore.createIndex('type', 'type', { unique: false });
+        store.createIndex('date', 'date', { unique: false });
+        store.createIndex('user', 'user', { unique: false });
       }
       
-      // Create analytics store
-      if (!db.objectStoreNames.contains('analytics')) {
-        const analyticsStore = db.createObjectStore('analytics', { 
-          keyPath: 'timestamp' 
+      // Settings store
+      if (!db.objectStoreNames.contains('settings')) {
+        const store = db.createObjectStore('settings', {
+          keyPath: 'key'
         });
-        analyticsStore.createIndex('type', 'type', { unique: false });
       }
     };
   });
 }
 
-async function getPendingSyncs() {
-  const db = await openDatabase();
+// Patient CRUD operations
+async function savePatient(patient) {
+  const db = await initDatabase();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(['pendingSyncs'], 'readonly');
-    const store = transaction.objectStore('pendingSyncs');
-    const request = store.getAll();
+    const transaction = db.transaction(['patients'], 'readwrite');
+    const store = transaction.objectStore('patients');
+    
+    // Add timestamp
+    patient.createdAt = new Date().toISOString();
+    patient.updatedAt = patient.createdAt;
+    patient.synced = false; // Mark as not synced (for future use)
+    
+    const request = store.add(patient);
     
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
-async function removePendingSync(id) {
-  const db = await openDatabase();
+async function getAllPatients(filters = {}) {
+  const db = await initDatabase();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(['pendingSyncs'], 'readwrite');
-    const store = transaction.objectStore('pendingSyncs');
-    const request = store.delete(id);
+    const transaction = db.transaction(['patients'], 'readonly');
+    const store = transaction.objectStore('patients');
     
+    let request;
+    if (filters.priority) {
+      const index = store.index('priority');
+      request = index.getAll(filters.priority);
+    } else if (filters.status) {
+      const index = store.index('status');
+      request = index.getAll(filters.status);
+    } else {
+      request = store.getAll();
+    }
+    
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function updatePatient(id, updates) {
+  const db = await initDatabase();
+  return new Promise(async (resolve, reject) => {
+    const transaction = db.transaction(['patients'], 'readwrite');
+    const store = transaction.objectStore('patients');
+    
+    // Get existing patient
+    const getRequest = store.get(id);
+    getRequest.onsuccess = () => {
+      const patient = getRequest.result;
+      if (!patient) {
+        reject(new Error('Patient not found'));
+        return;
+      }
+      
+      // Update with new data
+      const updatedPatient = {
+        ...patient,
+        ...updates,
+        updatedAt: new Date().toISOString()
+      };
+      
+      const putRequest = store.put(updatedPatient);
+      putRequest.onsuccess = () => resolve();
+      putRequest.onerror = () => reject(putRequest.error);
+    };
+    getRequest.onerror = () => reject(getRequest.error);
+  });
+}
+
+async function deletePatient(id) {
+  const db = await initDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(['patients'], 'readwrite');
+    const store = transaction.objectStore('patients');
+    
+    const request = store.delete(id);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
 }
 
-// Push notifications for emergency alerts
-self.addEventListener('push', event => {
-  console.log('[Service Worker] Push received:', event);
+// Data export/import (for backup/restore)
+async function exportAllData() {
+  const db = await initDatabase();
   
-  const data = event.data ? event.data.json() : {};
-  const title = data.title || 'Upline Emergency Alert';
-  const options = {
-    body: data.body || 'New emergency case requires attention',
-    icon: '/icon-192.png',
-    badge: '/icon-192.png',
-    tag: 'emergency-alert',
-    data: data.url || '/',
-    actions: [
-      {
-        action: 'view',
-        title: 'View Case'
-      },
-      {
-        action: 'dismiss',
-        title: 'Dismiss'
-      }
-    ]
-  };
-  
-  event.waitUntil(
-    self.registration.showNotification(title, options)
-  );
-});
-
-self.addEventListener('notificationclick', event => {
-  console.log('[Service Worker] Notification click:', event);
-  
-  event.notification.close();
-  
-  if (event.action === 'view') {
-    event.waitUntil(
-      clients.openWindow(event.notification.data)
+  return new Promise(async (resolve, reject) => {
+    const exportData = {
+      version: DB_VERSION,
+      exportedAt: new Date().toISOString(),
+      patients: [],
+      settings: [],
+      history: []
+    };
+    
+    const transaction = db.transaction(
+      ['patients', 'settings', 'triage_history'], 
+      'readonly'
     );
-  }
-});
+    
+    // Export patients
+    const patientsStore = transaction.objectStore('patients');
+    const patientsRequest = patientsStore.getAll();
+    patientsRequest.onsuccess = () => {
+      exportData.patients = patientsRequest.result;
+    };
+    
+    // Export settings
+    const settingsStore = transaction.objectStore('settings');
+    const settingsRequest = settingsStore.getAll();
+    settingsRequest.onsuccess = () => {
+      exportData.settings = settings
